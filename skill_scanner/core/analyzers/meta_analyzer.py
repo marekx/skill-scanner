@@ -841,7 +841,19 @@ class MetaAnalyzer(BaseAnalyzer):
         # analyzer's normalization and request-parameter handling so the meta
         # analyzer receives the same key and default endpoint.
         self.provider_config: ProviderConfig | None = None
-        if self.provider == "orcarouter" or self.model.lower().startswith("orcarouter/"):
+        # Direct first-party Anthropic with no API key also goes through ProviderConfig,
+        # so keyless workload identity federation applies to the meta-analyzer too.
+        model_lower = self.model.lower()
+        needs_provider_config = (
+            self.provider == "orcarouter"
+            or model_lower.startswith("orcarouter/")
+            or (
+                not self.api_key
+                and self.provider not in {"openai", "openai-compatible", "custom-openai"}
+                and (model_lower.startswith("claude") or model_lower.startswith("anthropic/"))
+            )
+        )
+        if needs_provider_config:
             self.provider_config = ProviderConfig(
                 model=self.model,
                 api_key=self.api_key,

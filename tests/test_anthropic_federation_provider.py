@@ -73,14 +73,16 @@ def test_federation_mints_bearer_token() -> None:
         ):
             cfg = ProviderConfig(model="claude-sonnet-5")
 
-    assert cfg._using_anthropic_oauth is True
-    assert cfg.api_key == "oat-token"
+        assert cfg._using_anthropic_oauth is True
+        assert cfg.api_key == "oat-token"
 
-    params = cfg.get_request_params()
-    assert params.get("auth_token") == "oat-token"
-    assert "api_key" not in params
-    assert params["extra_headers"]["anthropic-beta"] == "oauth-2025-04-20"
-    cfg.validate()  # must not raise
+        params = cfg.get_request_params()
+        # LiteLLM's Anthropic route reads bearer tokens only from ANTHROPIC_AUTH_TOKEN.
+        assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "oat-token"
+        assert "api_key" not in params
+        assert "auth_token" not in params
+        assert params["extra_headers"]["anthropic-beta"] == "oauth-2025-04-20"
+        cfg.validate()  # must not raise
 
 
 def test_explicit_key_takes_precedence_over_federation() -> None:
@@ -110,3 +112,26 @@ def test_federation_env_without_sdk_falls_through() -> None:
             cfg = ProviderConfig(model="claude-sonnet-5")
     assert cfg._using_anthropic_oauth is False
     assert cfg.api_key is None
+
+
+def test_meta_analyzer_uses_federation_without_key() -> None:
+    from skill_scanner.core.analyzers.meta_analyzer import MetaAnalyzer
+
+    with patch.dict(os.environ, FEDERATION_ENV, clear=True):
+        with patch(
+            "anthropic.lib.credentials.default_credentials",
+            return_value=_fake_credentials("oat-meta"),
+        ):
+            meta = MetaAnalyzer(model="claude-sonnet-5")
+
+    assert meta.provider_config is not None
+    assert meta.provider_config._using_anthropic_oauth is True
+    assert meta.api_key == "oat-meta"
+
+
+def test_meta_analyzer_without_credentials_still_raises() -> None:
+    from skill_scanner.core.analyzers.meta_analyzer import MetaAnalyzer
+
+    with patch.dict(os.environ, {}, clear=True):
+        with pytest.raises(ValueError, match="API key not configured"):
+            MetaAnalyzer(model="claude-sonnet-5")

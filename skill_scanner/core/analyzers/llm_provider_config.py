@@ -451,8 +451,8 @@ class ProviderConfig:
                 )
             if self.is_anthropic:
                 raise ValueError(
-                    f"No API key or workload-identity credentials found for Anthropic model {self.model}. "
-                    "Set SKILL_SCANNER_LLM_API_KEY, or configure federation "
+                    f"API key required for model {self.model}: set SKILL_SCANNER_LLM_API_KEY, "
+                    "or configure workload-identity federation "
                     "(ANTHROPIC_FEDERATION_RULE_ID, ANTHROPIC_ORGANIZATION_ID, "
                     "ANTHROPIC_SERVICE_ACCOUNT_ID, ANTHROPIC_IDENTITY_TOKEN[_FILE]) "
                     "with skill-scanner[anthropic] installed."
@@ -472,11 +472,12 @@ class ProviderConfig:
                 # Azure with Entra ID: pass as azure_ad_token (not api_key)
                 params["azure_ad_token"] = self.api_key
             elif self._using_anthropic_oauth:
-                # Anthropic workload-identity token: LiteLLM sends it as
-                # Authorization: Bearer (via auth_token) and drops x-api-key.
-                # Add the OAuth beta header explicitly so it doesn't depend on
-                # LiteLLM's token-prefix auto-detection.
-                params["auth_token"] = self.api_key
+                # Anthropic workload-identity token. LiteLLM's Anthropic route reads
+                # bearer tokens only from ANTHROPIC_AUTH_TOKEN (an auth_token request
+                # param is dropped), and sends it as Authorization: Bearer with no
+                # x-api-key. Add the OAuth beta header explicitly so it doesn't depend
+                # on LiteLLM's token-prefix auto-detection.
+                os.environ["ANTHROPIC_AUTH_TOKEN"] = self.api_key
                 extra_headers = dict(params.get("extra_headers") or {})
                 extra_headers.setdefault("anthropic-beta", "oauth-2025-04-20")
                 params["extra_headers"] = extra_headers
