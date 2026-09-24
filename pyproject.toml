@@ -112,6 +112,10 @@ vertex = [
 azure = [
     "azure-identity>=1.20,<2",
 ]
+# First-party Anthropic workload identity federation (keyless auth, e.g. CI OIDC)
+anthropic = [
+    "anthropic>=0.69,<1",
+]
 # Supply chain dependency scanning (requires network access)
 # NOTE: guarddog has a dependency conflict with pip-audit via tomli.
 # Install separately: pip install guarddog
@@ -123,6 +127,7 @@ all = [
     "boto3>=1.40,<2",
     "google-cloud-aiplatform>=1.130,<2",
     "azure-identity>=1.20,<2",
+    "anthropic>=0.69,<1",
     "httplib2>=0.32.0",  # PYSEC-2026-3444
     "pyasn1>=0.6.4",  # PYSEC-2026-3455, PYSEC-2026-3456, PYSEC-2026-3457
 ]

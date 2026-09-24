@@ -186,6 +186,24 @@ class ProviderConfig:
             not self.is_openai_compatible and model_lower.startswith("orcarouter/")
         )
         self.is_gpt5 = "gpt-5" in model_lower
+        # First-party Anthropic: a Claude model routed directly to api.anthropic.com
+        # (not through Bedrock/Vertex/Azure/OpenAI-compatible gateways). Used to enable
+        # keyless auth via Anthropic workload identity federation.
+        self.is_anthropic = (
+            not self.is_openai_compatible
+            and not self.is_bedrock
+            and not self.is_vertex
+            and not self.is_azure
+            and not self.is_gemini
+            and not self.is_ollama
+            and not self.is_openrouter
+            and not self.is_orcarouter
+            and (
+                model_lower.startswith("anthropic/")
+                or model_lower.startswith("claude")
+                or "claude-" in model_lower
+            )
+        )
 
         if self.is_ollama:
             self.base_url = resolve_ollama_base_url(self.base_url)
@@ -234,6 +252,7 @@ class ProviderConfig:
 
         # Resolve API key (may acquire Entra ID token for Azure)
         self._using_entra_id = False
+        self._using_anthropic_oauth = False
         self.api_key = self._resolve_api_key(api_key)
 
         # Note: Google SDK client is created per-request, not configured globally
@@ -295,6 +314,13 @@ class ProviderConfig:
             if token:
                 return token
 
+        # Anthropic fallback: mint a short-lived token via workload identity
+        # federation (keyless auth from CI, e.g. GitHub Actions OIDC).
+        if self.is_anthropic:
+            token = self._try_anthropic_federation_token()
+            if token:
+                return token
+
         return None
 
     def _try_azure_entra_id_token(self) -> str | None:
@@ -323,6 +349,55 @@ class ProviderConfig:
         except Exception as e:
             logger.debug("Entra ID token acquisition failed: %s", e)
             return None
+
+    def _try_anthropic_federation_token(self) -> str | None:
+        """Attempt to acquire a first-party Anthropic access token, keyless.
+
+        Uses the official ``anthropic`` SDK credential chain
+        (``anthropic.lib.credentials.default_credentials``), which resolves
+        Anthropic **workload identity federation** -- exchanging an external
+        OIDC JWT (e.g. a GitHub Actions id-token) for a short-lived Anthropic
+        access token at ``POST /v1/oauth/token``. Enables keyless CI runs with
+        no ``SKILL_SCANNER_LLM_API_KEY`` set.
+
+        Activates only when federation/bearer env is present, so an on-disk
+        OAuth profile is never picked up implicitly:
+        ``ANTHROPIC_FEDERATION_RULE_ID`` (+ ``ANTHROPIC_ORGANIZATION_ID`` +
+        ``ANTHROPIC_SERVICE_ACCOUNT_ID`` + ``ANTHROPIC_IDENTITY_TOKEN`` or
+        ``ANTHROPIC_IDENTITY_TOKEN_FILE``), or ``ANTHROPIC_AUTH_TOKEN``.
+
+        Requires the ``anthropic`` package (``pip install skill-scanner[anthropic]``).
+        """
+        federation_configured = bool(
+            os.getenv("ANTHROPIC_FEDERATION_RULE_ID")
+            or os.getenv("ANTHROPIC_AUTH_TOKEN")
+            or os.getenv("ANTHROPIC_IDENTITY_TOKEN")
+            or os.getenv("ANTHROPIC_IDENTITY_TOKEN_FILE")
+        )
+        if not federation_configured:
+            return None
+
+        try:
+            from anthropic.lib.credentials import default_credentials
+        except (ImportError, ModuleNotFoundError):
+            logger.debug(
+                "Anthropic federation env is set but the anthropic SDK is not installed. "
+                "Install with: pip install skill-scanner[anthropic]"
+            )
+            return None
+
+        try:
+            result = default_credentials(base_url="https://api.anthropic.com")
+            if result is None or getattr(result, "provider", None) is None:
+                return None
+            token = result.provider(force_refresh=False).token
+            if token:
+                self._using_anthropic_oauth = True
+                logger.info("Acquired Anthropic access token via workload identity federation")
+                return token
+        except Exception as e:
+            logger.debug("Anthropic federation token exchange failed: %s", e)
+        return None
 
     def _normalize_gemini_model_name(self, model: str) -> str:
         """
@@ -374,6 +449,14 @@ class ProviderConfig:
                     "Set SKILL_SCANNER_LLM_API_KEY, run 'az login', or install "
                     "skill-scanner[azure] for Entra ID support."
                 )
+            if self.is_anthropic:
+                raise ValueError(
+                    f"No API key or workload-identity credentials found for Anthropic model {self.model}. "
+                    "Set SKILL_SCANNER_LLM_API_KEY, or configure federation "
+                    "(ANTHROPIC_FEDERATION_RULE_ID, ANTHROPIC_ORGANIZATION_ID, "
+                    "ANTHROPIC_SERVICE_ACCOUNT_ID, ANTHROPIC_IDENTITY_TOKEN[_FILE]) "
+                    "with skill-scanner[anthropic] installed."
+                )
             raise ValueError(f"API key required for model {self.model}")
 
     def get_request_params(self) -> dict:
@@ -388,6 +471,15 @@ class ProviderConfig:
             elif self.is_azure and self._using_entra_id:
                 # Azure with Entra ID: pass as azure_ad_token (not api_key)
                 params["azure_ad_token"] = self.api_key
+            elif self._using_anthropic_oauth:
+                # Anthropic workload-identity token: LiteLLM sends it as
+                # Authorization: Bearer (via auth_token) and drops x-api-key.
+                # Add the OAuth beta header explicitly so it doesn't depend on
+                # LiteLLM's token-prefix auto-detection.
+                params["auth_token"] = self.api_key
+                extra_headers = dict(params.get("extra_headers") or {})
+                extra_headers.setdefault("anthropic-beta", "oauth-2025-04-20")
+                params["extra_headers"] = extra_headers
             else:
                 # Pass api_key for all providers including Bedrock (bearer token auth)
                 params["api_key"] = self.api_key
